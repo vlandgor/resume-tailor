@@ -1,0 +1,20 @@
+{
+  "name": "resume-tailor",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-only tool: tailor a base resume to job postings with the AI model of your choice.",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --serve"
+  },
+  "dependencies": {
+    "docx": "^9.0.0",
+    "mammoth": "^1.8.0",
+    "marked": "^12.0.0",
+    "pdfjs-dist": "^4.10.38"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}
