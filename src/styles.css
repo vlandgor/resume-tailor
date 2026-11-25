@@ -139,3 +139,13 @@ button:disabled { opacity: .6; cursor: progress; }
 }
 #toast.show { opacity: 1; transform: none; }
 #toast.err { background: var(--danger); }
+
+/* ---------- DOCX-styled resume ---------- */
+.editor.docx-mode { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
+.docx-box { background: #e9e9ec; border: 1px solid var(--line); border-radius: var(--radius); overflow: auto; max-height: calc(100vh - 60px); position: sticky; top: 0; min-height: 300px; }
+.docx-box .docx-wrapper { background: transparent !important; padding: 20px !important; }
+.docx-box .docx-wrapper > section.docx { box-shadow: 0 2px 10px rgba(0,0,0,.15); margin-bottom: 20px; }
+.pages { font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 12px; }
+.pages.ok { background: #e3f4e8; color: #1f6b3a; }
+.pages.bad { background: #fbe4e4; color: var(--danger); }
+[hidden] { display: none !important; }

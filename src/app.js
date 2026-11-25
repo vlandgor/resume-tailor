@@ -3,12 +3,17 @@ import { marked } from 'marked';
 import { store } from './store.js';
 import { listModels, complete, providerList } from './providers.js';
 import * as prompts from './prompts.js';
-import { extractResumeText, downloadDocx, printPdf, downloadBlob } from './files.js';
+import { extractResumeText, downloadDocx, printPdf, downloadBlob, fileBase } from './files.js';
+import { parseTemplate, buildDocx, toB64, linesToPlain, protectLinks } from './docxTemplate.js';
+import { renderDocx, measureDocxPages, measureMdPages, printDocx } from './preview.js';
 
 const $ = s => document.querySelector(s);
 const main = $('#main');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const STATUSES = ['draft', 'applied', 'interview', 'offer', 'rejected'];
+const MAX_PAGES = 2;
+// The browser estimate runs ~15% short of real Word/Docs layout, so enforce with a safety margin.
+const PAGE_LIMIT = 1.85;
 const state = { providers: [], settings: null, models: {} };
 
 let toastTimer;
@@ -17,34 +22,90 @@ function toast(msg, isErr = false) {
   t.textContent = msg;
   t.className = `show${isErr ? ' err' : ''}`;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.className = ''), isErr ? 7000 : 2500);
+  toastTimer = setTimeout(() => (t.className = ''), isErr ? 8000 : 3000);
 }
 const setSaveStatus = text => { const el = $('#saveStatus'); if (el) el.textContent = text; };
+const pagesBadge = p => (p ? `<span class="pages ${p > PAGE_LIMIT ? 'bad' : 'ok'}" title="Estimated from the on-screen layout. Over ${PAGE_LIMIT} risks spilling onto page 3 in Word/Docs.">≈ ${p.toFixed(1)} pages${p > PAGE_LIMIT ? ' — too long' : ''}</span>` : '');
+
+// ---------- documents ----------
+async function resumeBlob(a) {
+  const tpl = store.getTemplate(a.templateId);
+  if (!tpl) throw new Error('The style template for this application is missing. Re-upload your DOCX and re-tailor.');
+  return buildDocx(tpl, a.lines);
+}
+
+async function measure(a) {
+  if (a.mode === 'docx') return measureDocxPages(await resumeBlob(a), a.page, a.fonts);
+  return measureMdPages(a.resumeMd);
+}
+
+const resumeAsText = a => (a.mode === 'docx' ? linesToPlain(a.lines) : a.resumeMd);
 
 // ---------- AI actions ----------
-async function tailor(id, { provider, model, instructions = '' }) {
+async function tailor(id, { provider, model, instructions = '' }, onStep = () => {}) {
   const a = store.getApp(id);
-  const base = store.getBaseResume().text;
-  if (!base.trim()) throw new Error('Add your base resume first (sidebar → Base resume).');
+  const base = store.getBaseResume();
+  if (!base.text.trim()) throw new Error('Add your base resume first (sidebar → Base resume).');
   if (!a.jobText.trim()) throw new Error('This application has no job description.');
+  const docx = base.mode === 'docx' && store.getTemplate(base.templateId);
+
   const raw = await complete({
     provider, model, settings: store.getSettings(),
-    system: prompts.TAILOR_SYSTEM,
-    user: prompts.tailorUser({ baseResume: base, jobText: a.jobText, instructions }),
+    system: docx ? prompts.TAILOR_DOCX_SYSTEM : prompts.TAILOR_SYSTEM,
+    user: prompts.tailorUser({ baseResume: docx ? base.lines : base.text, jobText: a.jobText, instructions, basePages: base.pages }),
   });
-  const out = prompts.parseTailor(raw);
-  if (!out.resumeMd) throw new Error('The model returned an empty response. Try again or pick another model.');
+
+  let fields;
+  if (docx) {
+    const out = prompts.parseTailorLines(raw);
+    if (!out.lines) throw new Error('The model did not return the resume in the expected format. Try again or pick a stronger model.');
+    fields = { mode: 'docx', lines: protectLinks(out.lines, base.lines), resumeMd: '', templateId: base.templateId, page: base.page, fonts: base.fonts, changes: out.changes, company: out.company, title: out.title };
+  } else {
+    const out = prompts.parseTailor(raw);
+    if (!out.resumeMd) throw new Error('The model returned an empty response. Try again or pick another model.');
+    fields = { mode: 'text', resumeMd: out.resumeMd, lines: '', changes: out.changes, company: out.company, title: out.title };
+  }
+
   const fresh = store.getApp(id); // re-read in case title/company were edited meanwhile
-  return store.saveApp({
-    ...fresh,
-    resumeMd: out.resumeMd, changes: out.changes, resumeModel: `${provider}/${model}`,
-    company: fresh.company || out.company, title: fresh.title || out.title,
+  store.saveApp({
+    ...fresh, ...fields,
+    resumeModel: `${provider}/${model}`,
+    company: fresh.company || fields.company, title: fresh.title || fields.title,
   });
+  return enforceLength(id, { provider, model }, onStep);
+}
+
+// The 2-page hard rule: measure the rendered result; if it's too long, ask the model to cut (up to 2 rounds).
+async function enforceLength(id, { provider, model }, onStep = () => {}) {
+  for (let round = 0; ; round++) {
+    const a = store.getApp(id);
+    onStep('Checking length…');
+    const pages = await measure(a);
+    store.patchApp(id, { pages });
+    if (pages <= PAGE_LIMIT) return store.getApp(id);
+    if (round === 2) {
+      toast(`Still about ${pages.toFixed(1)} pages after shortening twice. Trim it by hand or use "Fit to 2 pages" again.`, true);
+      return store.getApp(id);
+    }
+    onStep(`${pages.toFixed(1)} pages — shortening…`);
+    const raw = await complete({
+      provider, model, settings: store.getSettings(),
+      system: a.mode === 'docx' ? prompts.TAILOR_DOCX_SYSTEM : prompts.TAILOR_SYSTEM,
+      user: prompts.shortenUser({ resume: a.mode === 'docx' ? a.lines : a.resumeMd, jobText: a.jobText, pages: pages.toFixed(1) }),
+    });
+    const out = a.mode === 'docx' ? prompts.parseTailorLines(raw) : prompts.parseTailor(raw);
+    const text = a.mode === 'docx' ? protectLinks(out.lines, a.lines) : out.resumeMd;
+    if (!text) throw new Error('The model returned an unusable response while shortening.');
+    store.patchApp(id, {
+      ...(a.mode === 'docx' ? { lines: text } : { resumeMd: text }),
+      changes: `${a.changes}${out.changes ? `\n\n**Shortened to fit 2 pages:**\n\n${out.changes}` : ''}`,
+    });
+  }
 }
 
 async function writeCover(id, { provider, model, instructions = '' }) {
   const a = store.getApp(id);
-  const resume = a.resumeMd || store.getBaseResume().text;
+  const resume = resumeAsText(a) || store.getBaseResume().text;
   if (!resume.trim()) throw new Error('Add your base resume first.');
   const raw = await complete({
     provider, model, settings: store.getSettings(),
@@ -114,11 +175,20 @@ function busy(btn, on, label) {
   if (on) {
     btn.dataset.label = btn.innerHTML;
     btn.disabled = true;
-    btn.innerHTML = `<span class="spinner"></span>${label || 'Working…'}`;
+    btn.innerHTML = `<span class="spinner"></span>${esc(label || 'Working…')}`;
   } else {
     btn.disabled = false;
     btn.innerHTML = btn.dataset.label;
   }
+}
+const stepper = btn => text => { btn.innerHTML = `<span class="spinner"></span>${esc(text)}`; };
+
+// Fit the 8.5in docx-preview page into its column.
+function fitPreview(box) {
+  const page = box.querySelector('section.docx');
+  const wrap = box.querySelector('.docx-wrapper');
+  if (!page || !wrap) return;
+  wrap.style.zoom = Math.min(1, (box.clientWidth - 4) / (page.offsetWidth + 40));
 }
 
 // ---------- views ----------
@@ -160,9 +230,9 @@ function viewNew() {
       title: $('#n-title').value.trim(), company: $('#n-company').value.trim(),
     });
     try {
-      await tailor(a.id, { ...m, instructions: $('#n-instr').value.trim() });
+      await tailor(a.id, { ...m, instructions: $('#n-instr').value.trim() }, stepper(btn));
       if ($('#n-cover').checked) {
-        btn.innerHTML = '<span class="spinner"></span>Writing cover letter…';
+        stepper(btn)('Writing cover letter…');
         await writeCover(a.id, m);
       }
     } catch (err) {
@@ -203,84 +273,170 @@ function viewApp(id, tab = 'resume') {
   };
 
   if (tab === 'job') return renderJobTab(a, patch);
-  renderDocTab(a, tab === 'cover' ? 'cover' : 'resume', patch);
+  if (tab === 'cover') return renderCoverTab(a, patch);
+  return renderResumeTab(a, patch);
 }
 
-function renderDocTab(a, kind, patch) {
-  const isCover = kind === 'cover';
-  const md = isCover ? a.coverMd : a.resumeMd;
-  const usedModel = isCover ? a.coverModel : a.resumeModel;
-  const run = isCover ? writeCover : tailor;
-  const body = $('#tabBody');
+// Shared "nothing generated yet" panel
+function genPanel(title, hint, placeholder, label, onGo) {
+  $('#tabBody').innerHTML = `<div class="gen-panel">
+    <h3 style="margin-top:0">${title}</h3>
+    <p class="muted">${hint}</p>
+    ${pickerHTML('g')}
+    <label>Extra instructions <span class="muted">(optional)</span></label>
+    <input id="g-instr" placeholder="${placeholder}">
+    <div style="margin-top:16px"><button id="g-go" class="primary">${label}</button></div>
+  </div>`;
+  const getModel = initPicker('g');
+  $('#g-go').onclick = e => onGo(e.currentTarget, getModel, $('#g-instr').value.trim());
+}
 
-  async function generate(btn, getModel, instructions) {
-    let m;
-    try { m = getModel(); } catch (err) { return toast(err.message, true); }
-    busy(btn, true, isCover ? 'Writing…' : 'Tailoring…');
-    try {
-      await run(a.id, { ...m, instructions: instructions.trim() });
-      route();
-    } catch (err) { toast(err.message, true); busy(btn, false); }
+async function runAction(btn, getModel, label, fn) {
+  let m;
+  try { m = getModel(); } catch (err) { return toast(err.message, true); }
+  busy(btn, true, label);
+  try { await fn(m); route(); } catch (err) { toast(err.message, true); busy(btn, false); }
+}
+
+function renderResumeTab(a, patch) {
+  const hasResume = a.mode === 'docx' ? !!a.lines : !!a.resumeMd;
+  const go = (btn, getModel, instructions) =>
+    runAction(btn, getModel, 'Tailoring…', m => tailor(a.id, { ...m, instructions }, stepper(btn)));
+
+  if (!hasResume) {
+    return genPanel('Tailor the resume', 'Uses your base resume and this job posting.', 'e.g. keep it to one page', 'Tailor resume', go);
   }
 
-  if (!md) {
-    body.innerHTML = `<div class="gen-panel">
-      <h3 style="margin-top:0">${isCover ? 'Write a cover letter' : 'Tailor the resume'}</h3>
-      <p class="muted">${isCover
-        ? 'Uses the tailored resume (or your base resume) and this job posting.'
-        : 'Uses your base resume and this job posting.'}</p>
-      ${pickerHTML('g')}
-      <label>Extra instructions <span class="muted">(optional)</span></label>
-      <input id="g-instr" placeholder="${isCover ? 'e.g. mention I can relocate, mention a referral from …' : 'e.g. keep it to one page'}">
-      <div style="margin-top:16px"><button id="g-go" class="primary">${isCover ? 'Write cover letter' : 'Tailor resume'}</button></div>
-    </div>`;
-    const getModel = initPicker('g');
-    $('#g-go').onclick = e => generate(e.currentTarget, getModel, $('#g-instr').value);
-    return;
-  }
-
-  body.innerHTML = `
+  const isDocx = a.mode === 'docx';
+  $('#tabBody').innerHTML = `
     <div class="toolbar">
       ${pickerHTML('g')}
-      <input id="g-instr" class="instr" placeholder="Instructions for regenerating (optional)">
-      <button id="g-go">${isCover ? 'Rewrite' : 'Re-tailor'}</button>
+      <input id="g-instr" class="instr" placeholder="Instructions for re-tailoring (optional)">
+      <button id="g-go">Re-tailor</button>
+      <span class="spacer"></span>
+      <span id="pagesSlot">${pagesBadge(a.pages)}</span>
+      <button id="g-fit" ${a.pages > PAGE_LIMIT ? '' : 'hidden'}>Fit to 2 pages</button>
+      <span id="saveStatus"></span>
+      <button id="dl-docx">Download .docx</button>
+      <button id="dl-pdf" class="primary">Save as PDF</button>
+    </div>
+    ${a.changes ? `<details class="changes"><summary>What was changed</summary>${marked.parse(a.changes)}</details>` : ''}
+    <p class="muted" style="margin:0 0 10px;font-size:12px">${a.resumeModel ? `Generated with ${esc(a.resumeModel)} · ` : ''}${isDocx
+      ? 'Your own DOCX styling is kept. Edit text after "|" on the left; delete a line to remove it, or duplicate a line to add one with the same formatting. Edits save automatically.'
+      : 'Edit on the left, preview on the right — edits save automatically.'}</p>
+    <div class="editor ${isDocx ? 'docx-mode' : ''}">
+      <textarea id="d-md" spellcheck="true"></textarea>
+      <div id="d-preview" class="${isDocx ? 'docx-box' : 'paper'}"></div>
+    </div>`;
+  const getModel = initPicker('g');
+  const ta = $('#d-md'), pv = $('#d-preview');
+  ta.value = isDocx ? a.lines : a.resumeMd;
+
+  let renderSeq = 0;
+  const render = async () => {
+    const cur = store.getApp(a.id);
+    if (!isDocx) { pv.innerHTML = marked.parse(cur.resumeMd); return; }
+    const seq = ++renderSeq;
+    try {
+      const blob = await resumeBlob(cur);
+      if (seq !== renderSeq) return;
+      await renderDocx(blob, pv, cur.fonts);
+      if (seq !== renderSeq) return;
+      fitPreview(pv);
+    } catch (e) { pv.innerHTML = `<p class="danger" style="padding:16px">${esc(e.message)}</p>`; }
+  };
+  const remeasure = async () => {
+    try {
+      const pages = await measure(store.getApp(a.id));
+      patch({ pages });
+      $('#pagesSlot').innerHTML = pagesBadge(pages);
+      $('#g-fit').hidden = pages <= PAGE_LIMIT;
+    } catch { /* preview shows the error */ }
+  };
+  render();
+  window.onresize = () => fitPreview(pv);
+
+  let t;
+  ta.oninput = () => {
+    if (!isDocx) pv.innerHTML = marked.parse(ta.value);
+    setSaveStatus('Editing…');
+    clearTimeout(t);
+    t = setTimeout(async () => {
+      try {
+        patch(isDocx ? { lines: ta.value } : { resumeMd: ta.value });
+        setSaveStatus('Saved');
+        if (isDocx) await render();
+        remeasure();
+      } catch (e) { setSaveStatus('Save failed'); toast(e.message, true); }
+    }, isDocx ? 700 : 500);
+  };
+
+  $('#dl-docx').onclick = async () => {
+    try {
+      const cur = store.getApp(a.id);
+      if (isDocx) downloadBlob(await resumeBlob(cur), `${fileBase(cur, 'resume')}.docx`);
+      else await downloadDocx(cur, 'resume');
+    } catch (e) { toast(e.message, true); }
+  };
+  $('#dl-pdf').onclick = async () => {
+    try {
+      const cur = store.getApp(a.id);
+      if (isDocx) await printDocx(await resumeBlob(cur), fileBase(cur, 'resume'), cur.page, cur.fonts);
+      else printPdf(cur, 'resume');
+    } catch (e) { toast(e.message, true); }
+  };
+  $('#g-go').onclick = e => {
+    if (!confirm('This replaces the current version, including your manual edits. Continue?')) return;
+    go(e.currentTarget, getModel, $('#g-instr').value.trim());
+  };
+  $('#g-fit').onclick = e => {
+    const btn = e.currentTarget;
+    runAction(btn, getModel, 'Shortening…', m => enforceLength(a.id, m, stepper(btn)));
+  };
+}
+
+function renderCoverTab(a, patch) {
+  const go = (btn, getModel, instructions) =>
+    runAction(btn, getModel, 'Writing…', m => writeCover(a.id, { ...m, instructions }));
+
+  if (!a.coverMd) {
+    return genPanel('Write a cover letter', 'Uses the tailored resume (or your base resume) and this job posting.',
+      'e.g. mention I can relocate, mention a referral from …', 'Write cover letter', go);
+  }
+
+  $('#tabBody').innerHTML = `
+    <div class="toolbar">
+      ${pickerHTML('g')}
+      <input id="g-instr" class="instr" placeholder="Instructions for rewriting (optional)">
+      <button id="g-go">Rewrite</button>
       <span class="spacer"></span>
       <span id="saveStatus"></span>
       <button id="dl-docx">Download .docx</button>
       <button id="dl-pdf" class="primary">Save as PDF</button>
     </div>
-    ${!isCover && a.changes ? `<details class="changes"><summary>What was changed</summary>${marked.parse(a.changes)}</details>` : ''}
-    ${usedModel ? `<p class="muted" style="margin:0 0 10px;font-size:12px">Generated with ${esc(usedModel)} · edit on the left, preview on the right — edits save automatically.</p>` : ''}
+    ${a.coverModel ? `<p class="muted" style="margin:0 0 10px;font-size:12px">Generated with ${esc(a.coverModel)} · edits save automatically.</p>` : ''}
     <div class="editor">
       <textarea id="d-md" spellcheck="true"></textarea>
       <div id="d-preview" class="paper"></div>
     </div>`;
   const getModel = initPicker('g');
-
   const ta = $('#d-md'), pv = $('#d-preview');
-  ta.value = md;
-  const render = () => (pv.innerHTML = marked.parse(ta.value));
-  render();
+  ta.value = a.coverMd;
+  pv.innerHTML = marked.parse(a.coverMd);
   let t;
   ta.oninput = () => {
-    render();
+    pv.innerHTML = marked.parse(ta.value);
     setSaveStatus('Editing…');
     clearTimeout(t);
     t = setTimeout(() => {
-      try { patch(isCover ? { coverMd: ta.value } : { resumeMd: ta.value }); setSaveStatus('Saved'); }
-      catch (e) { setSaveStatus('Save failed'); toast(e.message, true); }
+      try { patch({ coverMd: ta.value }); setSaveStatus('Saved'); } catch (e) { toast(e.message, true); }
     }, 500);
   };
-
-  $('#dl-docx').onclick = async () => {
-    try { await downloadDocx(store.getApp(a.id), kind); } catch (e) { toast(e.message, true); }
-  };
-  $('#dl-pdf').onclick = () => {
-    try { printPdf(store.getApp(a.id), kind); } catch (e) { toast(e.message, true); }
-  };
+  $('#dl-docx').onclick = async () => { try { await downloadDocx(store.getApp(a.id), 'cover'); } catch (e) { toast(e.message, true); } };
+  $('#dl-pdf').onclick = () => { try { printPdf(store.getApp(a.id), 'cover'); } catch (e) { toast(e.message, true); } };
   $('#g-go').onclick = e => {
-    if (!confirm('This replaces the current version, including your manual edits. Continue?')) return;
-    generate(e.currentTarget, getModel, $('#g-instr').value);
+    if (!confirm('This replaces the current letter, including your manual edits. Continue?')) return;
+    go(e.currentTarget, getModel, $('#g-instr').value.trim());
   };
 }
 
@@ -308,33 +464,65 @@ function renderJobTab(a, patch) {
 
 function viewResume() {
   const r = store.getBaseResume();
-  main.innerHTML = `<div class="narrow" style="max-width:980px">
+  const isDocx = r.mode === 'docx' && store.getTemplate(r.templateId);
+  main.innerHTML = `<div style="max-width:1200px">
     <h1>Base resume</h1>
-    <p class="muted">Your original resume — every tailored version starts from this. Upload a PDF, DOCX, TXT or Markdown file, or paste and edit the text directly.
-    Text pulled from a PDF can come out a bit jumbled; the AI cleans it up when tailoring, but a quick look helps.</p>
+    <p class="muted">Every tailored version starts from this.
+      <b>To keep your own design</b> (colors, fonts, links, spacing), upload it as <b>DOCX</b> — from Google Docs:
+      <i>File → Download → Microsoft Word (.docx)</i>. PDF, TXT or pasted text also work, but then the built-in layout is used.</p>
     <div class="row" style="margin:14px 0">
-      <input type="file" id="b-file" accept=".pdf,.docx,.txt,.md" style="flex:0 1 auto">
+      <input type="file" id="b-file" accept=".docx,.pdf,.txt,.md" style="flex:0 1 auto">
       <span style="flex:1"></span>
-      <span class="muted" style="font-size:12px">${r.updatedAt ? `${esc(r.fileName || 'Edited')} · updated ${new Date(r.updatedAt).toLocaleString()}` : 'Not set yet'}</span>
+      ${pagesBadge(r.pages)}
+      <span class="muted" style="font-size:12px">${r.updatedAt ? `${esc(r.fileName || 'Edited')} · ${isDocx ? 'style template' : 'plain text'} · updated ${new Date(r.updatedAt).toLocaleString()}` : 'Not set yet'}</span>
     </div>
-    <textarea id="b-text" class="big" placeholder="Paste your resume here…">${esc(r.text)}</textarea>
-    <div class="row" style="margin-top:12px"><button id="b-save" class="primary">Save</button><span id="saveStatus"></span></div>
+    ${isDocx ? `
+      <div class="editor docx-mode">
+        <div>
+          <p class="muted" style="margin-top:0">What the AI sees: one line per paragraph. The § number links each line to its formatting.</p>
+          <textarea readonly class="big">${esc(r.lines)}</textarea>
+        </div>
+        <div id="b-preview" class="docx-box"></div>
+      </div>` : `
+      <textarea id="b-text" class="big" placeholder="Paste your resume here…">${esc(r.text)}</textarea>
+      <div class="row" style="margin-top:12px"><button id="b-save" class="primary">Save</button><span id="saveStatus"></span></div>`}
   </div>`;
+
+  if (isDocx) {
+    const pv = $('#b-preview');
+    renderDocx(new Blob([Uint8Array.from(atob(store.getTemplate(r.templateId)), c => c.charCodeAt(0))]), pv, r.fonts)
+      .then(() => fitPreview(pv)).catch(e => (pv.textContent = e.message));
+  } else {
+    $('#b-save').onclick = () => {
+      const text = $('#b-text').value;
+      store.saveBaseResume({ ...store.getBaseResume(), mode: 'text', text, lines: '', templateId: '' });
+      measureMdPages(text).then(pages => store.saveBaseResume({ ...store.getBaseResume(), pages }));
+      setSaveStatus('Saved');
+      toast('Base resume saved');
+    };
+  }
+
   $('#b-file').onchange = async e => {
     const f = e.target.files[0];
     if (!f) return;
     try {
-      const text = await extractResumeText(f);
-      store.saveBaseResume({ text, fileName: f.name });
-      $('#b-text').value = text;
-      toast('Resume imported and saved');
+      if (f.name.toLowerCase().endsWith('.docx')) {
+        const buf = await f.arrayBuffer();
+        const tpl = await parseTemplate(buf);
+        const b64 = toB64(buf);
+        if (b64.length > 2_000_000) throw new Error('This DOCX is large (big images?). Remove images or compress them and try again.');
+        const templateId = await store.saveTemplate(b64);
+        const pages = await measureDocxPages(new Blob([buf]), tpl.page, tpl.fonts);
+        store.saveBaseResume({ mode: 'docx', fileName: f.name, templateId, text: tpl.text, lines: tpl.lines, page: tpl.page, fonts: tpl.fonts, pages });
+        toast(pages > PAGE_LIMIT ? `Imported. Note: your base resume is about ${pages.toFixed(1)} pages; tailored versions will be cut to 2.` : 'Imported — tailored resumes will keep this styling');
+      } else {
+        const text = await extractResumeText(f);
+        const pages = await measureMdPages(text);
+        store.saveBaseResume({ mode: 'text', fileName: f.name, text, lines: '', templateId: '', page: null, fonts: [], pages });
+        toast('Imported as plain text (upload a DOCX to keep your own styling)');
+      }
+      viewResume();
     } catch (err) { toast(err.message, true); }
-  };
-  $('#b-save').onclick = () => {
-    const cur = store.getBaseResume();
-    store.saveBaseResume({ ...cur, text: $('#b-text').value });
-    setSaveStatus('Saved');
-    toast('Base resume saved');
   };
 }
 
@@ -359,7 +547,7 @@ function viewSettings() {
     <div style="margin-top:24px"><button id="s-save" class="primary">Save settings</button></div>
 
     <h3 style="margin-top:40px">Backup</h3>
-    <p class="muted">Your resume and applications live only in this browser. Export a backup now and then, and use Import to move
+    <p class="muted">Your resume, style template and applications live only in this browser. Export a backup now and then, and use Import to move
     them to another computer or browser. API keys are not included.</p>
     <div class="row">
       <button id="x-export">Export backup (.json)</button>
@@ -405,6 +593,7 @@ function viewSettings() {
 
 // ---------- router ----------
 function route() {
+  window.onresize = null;
   const [, view, id, tab] = location.hash.split('/');
   renderList();
   if (view === 'app' && id) return viewApp(id, tab);

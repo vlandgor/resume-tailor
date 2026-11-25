@@ -3,6 +3,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import mammoth from 'mammoth';
 import { Document, Packer, Paragraph, TextRun, AlignmentType, BorderStyle } from 'docx';
 import { marked } from 'marked';
+import { linesToPlain } from './docxTemplate.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('./pdf.worker.min.mjs', import.meta.url).href;
 
@@ -101,9 +102,11 @@ function mdToDocx(md) {
 }
 
 export function fileBase(app, kind) {
-  const name = (app.resumeMd.match(/^#\s+(.+)$/m)?.[1] || 'Resume').trim();
+  const name = (app.mode === 'docx'
+    ? linesToPlain(app.lines || '').split('\n').find(l => l.trim())
+    : app.resumeMd.match(/^#\s+(.+)$/m)?.[1]) || 'Resume';
   const part = kind === 'cover' ? 'Cover Letter' : 'Resume';
-  return [name, part, app.company].filter(Boolean).join(' - ').replace(/[\\/:*?"<>|]+/g, '').slice(0, 120);
+  return [name.trim(), part, app.company].filter(Boolean).join(' - ').replace(/[\\/:*?"<>|]+/g, '').slice(0, 120);
 }
 
 export function downloadBlob(blob, filename) {
@@ -121,7 +124,7 @@ export async function downloadDocx(app, kind) {
 }
 
 // ---------- print to PDF ----------
-const PRINT_CSS = `
+export const PRINT_CSS = `
 @page { size: letter; margin: 0.6in; }
 * { box-sizing: border-box; }
 body { margin: 0; font-family: Calibri, Carlito, "Segoe UI", Arial, sans-serif; font-size: 10.5pt; line-height: 1.35; color: #111; }
