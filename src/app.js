@@ -4,7 +4,7 @@ import { store } from './store.js';
 import { listModels, complete, providerList } from './providers.js';
 import * as prompts from './prompts.js';
 import { extractResumeText, downloadDocx, printPdf, downloadBlob, fileBase } from './files.js';
-import { parseTemplate, buildDocx, toB64, linesToPlain, protectLinks } from './docxTemplate.js';
+import { parseTemplate, buildDocx, toB64, fromB64, linesToPlain, protectLinks } from './docxTemplate.js';
 import { renderDocx, measureDocxPages, measureMdPages, printDocx } from './preview.js';
 
 const $ = s => document.querySelector(s);
@@ -492,14 +492,17 @@ function viewResume() {
     <div class="row" style="margin:14px 0">
       <input type="file" id="b-file" accept=".docx,.pdf,.txt,.md" style="flex:0 1 auto">
       <span style="flex:1"></span>
-      ${pagesBadge(r.pages)}
+      <span id="b-pages">${pagesBadge(r.pages)}</span>
       <span class="muted" style="font-size:12px">${r.updatedAt ? `${esc(r.fileName || 'Edited')} · ${isDocx ? 'style template' : 'plain text'} · updated ${new Date(r.updatedAt).toLocaleString()}` : 'Not set yet'}</span>
     </div>
     ${isDocx ? `
       <div class="editor docx-mode">
         <div>
-          <p class="muted" style="margin-top:0">What the AI sees: one line per paragraph. The § number links each line to its formatting.</p>
-          <textarea readonly class="big">${esc(r.lines)}</textarea>
+          <p class="muted" style="margin-top:0">What the AI sees: one line per paragraph. Edit the text after "| " and it saves automatically.
+            The § number links each line to its formatting, so keep it. Delete a line to drop it, or duplicate a line to add one with the same style.
+            Lines marked [link] contain hyperlinks; change those in Google Docs and re-upload.</p>
+          <textarea id="b-lines" class="big" spellcheck="true">${esc(r.lines)}</textarea>
+          <div class="row" style="margin-top:8px"><button id="b-reset">Reset to original</button><span id="saveStatus" class="muted"></span></div>
         </div>
         ${previewCol('b-preview')}
       </div>` : `
@@ -508,13 +511,60 @@ function viewResume() {
   </div>`;
 
   if (isDocx) {
-    const pv = $('#b-preview');
-    const blob = new Blob([Uint8Array.from(atob(store.getTemplate(r.templateId)), c => c.charCodeAt(0))]);
-    const renderBase = () => renderDocx(blob, pv, r.fonts, getView())
-      .then(() => fitPreview(pv)).catch(e => (pv.textContent = e.message));
+    const pv = $('#b-preview'), ta = $('#b-lines');
+    const tpl = store.getTemplate(r.templateId);
+    let seq = 0;
+    const renderBase = async () => {
+      const mine = ++seq;
+      try {
+        const blob = await buildDocx(tpl, store.getBaseResume().lines);
+        if (mine !== seq) return;
+        await renderDocx(blob, pv, r.fonts, getView());
+        fitPreview(pv);
+      } catch (e) { pv.textContent = e.message; }
+    };
+    // Save edited lines: hyperlink lines always keep their original text (the DOCX keeps them unchanged anyway).
+    const saveLines = async lines => {
+      const original = (await parseTemplate(fromB64(tpl))).lines;
+      const fixed = protectLinks(lines, original);
+      const blob = await buildDocx(tpl, fixed);
+      const pages = await measureDocxPages(blob, r.page, r.fonts);
+      store.saveBaseResume({ ...store.getBaseResume(), lines: fixed, text: linesToPlain(fixed), pages });
+      $('#b-pages').innerHTML = pagesBadge(pages);
+      return fixed;
+    };
     renderBase();
     initViewToggle(renderBase);
     window.onresize = () => fitPreview(pv);
+
+    let t = null;
+    const flush = async () => {
+      clearTimeout(t);
+      t = null;
+      try {
+        const fixed = await saveLines(ta.value);
+        if (fixed !== ta.value && document.activeElement !== ta) ta.value = fixed; // show protected link lines as they really are
+        setSaveStatus('Saved');
+        renderBase();
+      } catch (e) { setSaveStatus('Save failed'); toast(e.message, true); }
+    };
+    ta.oninput = () => {
+      setSaveStatus('Editing…');
+      clearTimeout(t);
+      t = setTimeout(flush, 700);
+    };
+    ta.onblur = () => {
+      if (t) return flush();
+      const saved = store.getBaseResume().lines; // already saved while typing: just show the protected version
+      if (saved !== ta.value) ta.value = saved;
+    };
+    $('#b-reset').onclick = async () => {
+      if (!confirm('Discard your edits and restore the text from the uploaded DOCX?')) return;
+      const original = (await parseTemplate(fromB64(tpl))).lines;
+      ta.value = await saveLines(original);
+      setSaveStatus('Restored');
+      renderBase();
+    };
   } else {
     $('#b-save').onclick = () => {
       const text = $('#b-text').value;
