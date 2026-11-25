@@ -39,11 +39,40 @@ const OPTIONS = {
   renderFooters: true,
 };
 
-export async function renderDocx(blob, container, fonts) {
+// view: 'single' — one continuous sheet; 'pages' — split onto page-sized sheets like Word/Docs.
+export async function renderDocx(blob, container, fonts, view = 'single') {
   loadFonts(fonts);
   container.innerHTML = '';
   await renderAsync(blob, container, container, OPTIONS);
   await settleTabs();
+  container.classList.toggle('paged', view === 'pages');
+  if (view === 'pages') paginate(container);
+}
+
+// Moves whole paragraphs/tables that cross the bottom margin onto a new sheet.
+// Approximate (no widow/orphan control), but close to what Word/Docs will do.
+function paginate(container) {
+  for (const first of container.querySelectorAll('.docx-wrapper > section.docx')) {
+    let sec = first;
+    for (let guard = 0; guard < 50; guard++) {
+      const art = sec.querySelector(':scope > article');
+      if (!art) break;
+      const cs = getComputedStyle(sec);
+      const usable = parseFloat(cs.minHeight) - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+      art.style.position = 'relative'; // makes offsetTop relative to the article
+      const blocks = Array.from(art.children);
+      let cut = blocks.findIndex(b => b.offsetTop + b.offsetHeight > usable + 1);
+      if (cut === -1) break;
+      if (cut === 0) cut = 1; // a single block taller than a page stays put
+      if (cut >= blocks.length) break;
+      const next = sec.cloneNode(false);
+      const nextArt = art.cloneNode(false);
+      next.appendChild(nextArt);
+      blocks.slice(cut).forEach(b => nextArt.appendChild(b));
+      sec.after(next);
+      sec = next;
+    }
+  }
 }
 
 function offscreen(widthIn) {

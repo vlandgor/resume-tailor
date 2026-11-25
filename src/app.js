@@ -183,6 +183,24 @@ function busy(btn, on, label) {
 }
 const stepper = btn => text => { btn.innerHTML = `<span class="spinner"></span>${esc(text)}`; };
 
+// Preview view mode: one continuous sheet, or split into pages. Remembered across visits.
+const getView = () => localStorage.getItem('rt.view') || 'single';
+const previewCol = id => `<div class="preview-col">
+  <div class="seg" id="viewSeg"><button data-view="single">Single page</button><button data-view="pages">Split pages</button></div>
+  <div id="${id}" class="docx-box"></div></div>`;
+function initViewToggle(onChange) {
+  const seg = $('#viewSeg');
+  const sync = () => seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.view === getView()));
+  sync();
+  seg.onclick = e => {
+    const v = e.target.dataset?.view;
+    if (!v || v === getView()) return;
+    localStorage.setItem('rt.view', v);
+    sync();
+    onChange();
+  };
+}
+
 // Fit the 8.5in docx-preview page into its column.
 function fitPreview(box) {
   const page = box.querySelector('section.docx');
@@ -326,7 +344,7 @@ function renderResumeTab(a, patch) {
       : 'Edit on the left, preview on the right — edits save automatically.'}</p>
     <div class="editor ${isDocx ? 'docx-mode' : ''}">
       <textarea id="d-md" spellcheck="true"></textarea>
-      <div id="d-preview" class="${isDocx ? 'docx-box' : 'paper'}"></div>
+      ${isDocx ? previewCol('d-preview') : '<div id="d-preview" class="paper"></div>'}
     </div>`;
   const getModel = initPicker('g');
   const ta = $('#d-md'), pv = $('#d-preview');
@@ -340,7 +358,7 @@ function renderResumeTab(a, patch) {
     try {
       const blob = await resumeBlob(cur);
       if (seq !== renderSeq) return;
-      await renderDocx(blob, pv, cur.fonts);
+      await renderDocx(blob, pv, cur.fonts, getView());
       if (seq !== renderSeq) return;
       fitPreview(pv);
     } catch (e) { pv.innerHTML = `<p class="danger" style="padding:16px">${esc(e.message)}</p>`; }
@@ -354,6 +372,7 @@ function renderResumeTab(a, patch) {
     } catch { /* preview shows the error */ }
   };
   render();
+  if (isDocx) initViewToggle(render);
   window.onresize = () => fitPreview(pv);
 
   let t;
@@ -482,7 +501,7 @@ function viewResume() {
           <p class="muted" style="margin-top:0">What the AI sees: one line per paragraph. The § number links each line to its formatting.</p>
           <textarea readonly class="big">${esc(r.lines)}</textarea>
         </div>
-        <div id="b-preview" class="docx-box"></div>
+        ${previewCol('b-preview')}
       </div>` : `
       <textarea id="b-text" class="big" placeholder="Paste your resume here…">${esc(r.text)}</textarea>
       <div class="row" style="margin-top:12px"><button id="b-save" class="primary">Save</button><span id="saveStatus"></span></div>`}
@@ -490,8 +509,12 @@ function viewResume() {
 
   if (isDocx) {
     const pv = $('#b-preview');
-    renderDocx(new Blob([Uint8Array.from(atob(store.getTemplate(r.templateId)), c => c.charCodeAt(0))]), pv, r.fonts)
+    const blob = new Blob([Uint8Array.from(atob(store.getTemplate(r.templateId)), c => c.charCodeAt(0))]);
+    const renderBase = () => renderDocx(blob, pv, r.fonts, getView())
       .then(() => fitPreview(pv)).catch(e => (pv.textContent = e.message));
+    renderBase();
+    initViewToggle(renderBase);
+    window.onresize = () => fitPreview(pv);
   } else {
     $('#b-save').onclick = () => {
       const text = $('#b-text').value;
