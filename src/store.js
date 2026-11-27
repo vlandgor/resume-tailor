@@ -57,6 +57,7 @@ export const store = {
       mode: 'text', resumeMd: '', lines: '', templateId: '', page: null, fonts: [], pages: null,
       changes: '', resumeModel: '',
       coverMd: '', coverModel: '',
+      messages: [], replyDraft: '', replyNotes: '', replyModel: '',
       createdAt: now, updatedAt: now,
       ...fields,
     };

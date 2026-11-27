@@ -1,6 +1,7 @@
 // Rendering DOCX in the browser (preview + PDF), and measuring page count for the 2-page limit.
 import { renderAsync } from 'docx-preview';
 import { marked } from 'marked';
+import { safeMd } from './safe.js';
 
 const PX_PER_IN = 96;
 const SYSTEM_FONTS = /^(arial|calibri|cambria|times new roman|times|georgia|verdana|tahoma|helvetica|courier new|courier|segoe ui|garamond|trebuchet ms|symbol|wingdings|aptos|consolas|book antiqua|palatino linotype)$/i;
@@ -116,7 +117,7 @@ export async function measureMdPages(md) {
   const box = offscreen(7.3); // letter width minus 0.6in margins
   try {
     box.className = 'mdm';
-    box.innerHTML = `<style>${MEASURE_CSS}</style>${marked.parse(md || '')}`;
+    box.innerHTML = `<style>${MEASURE_CSS}</style>${safeMd(md || '')}`;
     box.style.display = 'flow-root';
     await document.fonts.ready;
     return Math.round((box.scrollHeight / ((11 - 1.2) * PX_PER_IN)) * 100) / 100;

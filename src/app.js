@@ -1,5 +1,6 @@
 // Resume Tailor — browser-only app (hash routing, localStorage, direct AI calls)
 import { marked } from 'marked';
+import { safeMd } from './safe.js';
 import { store } from './store.js';
 import { listModels, complete, providerList } from './providers.js';
 import * as prompts from './prompts.js';
@@ -263,7 +264,8 @@ function viewNew() {
 function viewApp(id, tab = 'resume') {
   const a = store.getApp(id);
   if (!a) { location.hash = '#/new'; return; }
-  const TABS = { resume: 'Resume', cover: 'Cover letter', job: 'Job posting' };
+  const nMsg = (a.messages || []).length;
+  const TABS = { resume: 'Resume', cover: 'Cover letter', messages: `Messages${nMsg ? ` (${nMsg})` : ''}`, job: 'Job posting' };
   main.innerHTML = `
     <header class="app-head">
       <div class="fields">
@@ -291,6 +293,7 @@ function viewApp(id, tab = 'resume') {
   };
 
   if (tab === 'job') return renderJobTab(a, patch);
+  if (tab === 'messages') return renderMessagesTab(a, patch);
   if (tab === 'cover') return renderCoverTab(a, patch);
   return renderResumeTab(a, patch);
 }
@@ -338,7 +341,7 @@ function renderResumeTab(a, patch) {
       <button id="dl-docx">Download .docx</button>
       <button id="dl-pdf" class="primary">Save as PDF</button>
     </div>
-    ${a.changes ? `<details class="changes"><summary>What was changed</summary>${marked.parse(a.changes)}</details>` : ''}
+    ${a.changes ? `<details class="changes"><summary>What was changed</summary>${safeMd(a.changes)}</details>` : ''}
     <p class="muted" style="margin:0 0 10px;font-size:12px">${a.resumeModel ? `Generated with ${esc(a.resumeModel)} · ` : ''}${isDocx
       ? 'Your own DOCX styling is kept. Edit text after "|" on the left; delete a line to remove it, or duplicate a line to add one with the same formatting. Edits save automatically.'
       : 'Edit on the left, preview on the right — edits save automatically.'}</p>
@@ -353,7 +356,7 @@ function renderResumeTab(a, patch) {
   let renderSeq = 0;
   const render = async () => {
     const cur = store.getApp(a.id);
-    if (!isDocx) { pv.innerHTML = marked.parse(cur.resumeMd); return; }
+    if (!isDocx) { pv.innerHTML = safeMd(cur.resumeMd); return; }
     const seq = ++renderSeq;
     try {
       const blob = await resumeBlob(cur);
@@ -377,7 +380,7 @@ function renderResumeTab(a, patch) {
 
   let t;
   ta.oninput = () => {
-    if (!isDocx) pv.innerHTML = marked.parse(ta.value);
+    if (!isDocx) pv.innerHTML = safeMd(ta.value);
     setSaveStatus('Editing…');
     clearTimeout(t);
     t = setTimeout(async () => {
@@ -441,10 +444,10 @@ function renderCoverTab(a, patch) {
   const getModel = initPicker('g');
   const ta = $('#d-md'), pv = $('#d-preview');
   ta.value = a.coverMd;
-  pv.innerHTML = marked.parse(a.coverMd);
+  pv.innerHTML = safeMd(a.coverMd);
   let t;
   ta.oninput = () => {
-    pv.innerHTML = marked.parse(ta.value);
+    pv.innerHTML = safeMd(ta.value);
     setSaveStatus('Editing…');
     clearTimeout(t);
     t = setTimeout(() => {
@@ -457,6 +460,112 @@ function renderCoverTab(a, patch) {
     if (!confirm('This replaces the current letter, including your manual edits. Continue?')) return;
     go(e.currentTarget, getModel, $('#g-instr').value.trim());
   };
+}
+
+// ---------- recruiter messages: paste in, AI drafts, you send it yourself ----------
+async function draftReply(id, { provider, model, instructions = '' }) {
+  const a = store.getApp(id);
+  const thread = a.messages || [];
+  if (!thread.some(m => m.dir === 'in')) throw new Error('Paste a message from the recruiter first.');
+  const raw = await complete({
+    provider, model, settings: store.getSettings(),
+    system: prompts.REPLY_SYSTEM,
+    user: prompts.replyUser({
+      resume: resumeAsText(a) || store.getBaseResume().text,
+      jobText: a.jobText, company: a.company, title: a.title, notes: a.notes, thread, instructions,
+    }),
+  });
+  const out = prompts.parseReply(raw);
+  return store.patchApp(id, { replyDraft: out.reply, replyNotes: out.notes, replyModel: `${provider}/${model}` });
+}
+
+function renderMessagesTab(a, patch) {
+  const thread = a.messages || [];
+  const fmt = d => new Date(d).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+  $('#tabBody').innerHTML = `<div class="msgs">
+    <div class="thread">
+      ${thread.length ? thread.map(m => `
+        <div class="msg ${m.dir}">
+          <div class="msg-head"><b>${m.dir === 'in' ? 'Recruiter' : 'You'}</b><span>${esc(fmt(m.date))}</span>
+            <button class="icon-btn" data-del="${m.id}" title="Delete message" aria-label="Delete message">✕</button></div>
+          <div class="msg-body">${esc(m.text)}</div>
+        </div>`).join('') : `<p class="muted">No messages yet. When a recruiter writes to you about this job, paste their email below.
+        The app never connects to your email: you copy messages in and copy replies out.</p>`}
+    </div>
+
+    <div class="gen-panel">
+      <label style="margin-top:0">Paste the recruiter's message</label>
+      <textarea id="m-in" rows="6" placeholder="Paste the email text here (the part they wrote, not the whole quoted history)."></textarea>
+      <div class="row" style="margin-top:8px;gap:12px">
+        <button id="m-add">Add to conversation</button>
+        <label class="chk"><input type="checkbox" id="m-add-draft" checked> and draft a reply</label>
+      </div>
+    </div>
+
+    <div class="gen-panel">
+      <h3 style="margin-top:0">Your reply</h3>
+      <div class="toolbar">
+        ${pickerHTML('g')}
+        <input id="m-instr" class="instr" placeholder="What to say, e.g. available Tue/Wed afternoons; ask about the salary range">
+        <button id="m-draft" class="primary">${a.replyDraft ? 'Redraft' : 'Draft reply'}</button>
+      </div>
+      ${a.replyNotes ? `<div class="banner">${safeMd(a.replyNotes)}</div>` : ''}
+      <textarea id="m-reply" rows="12" placeholder="The drafted reply appears here. Edit it freely; it saves automatically.">${esc(a.replyDraft || '')}</textarea>
+      <div class="row" style="margin-top:8px;gap:8px">
+        <button id="m-copy" class="primary">Copy reply</button>
+        <button id="m-sent">Mark as sent</button>
+        <span class="muted" style="font-size:12px">${a.replyModel ? `Drafted with ${esc(a.replyModel)}. ` : ''}Fill any [placeholders] before sending.</span>
+        <span id="saveStatus" class="muted"></span>
+      </div>
+    </div>
+  </div>`;
+  const getModel = initPicker('g');
+  const reply = $('#m-reply');
+
+  const runDraft = async btn => {
+    let m;
+    try { m = getModel(); } catch (err) { return toast(err.message, true); }
+    busy(btn, true, 'Drafting…');
+    try { await draftReply(a.id, { ...m, instructions: $('#m-instr').value.trim() }); route(); }
+    catch (err) { toast(err.message, true); busy(btn, false); }
+  };
+
+  $('#m-add').onclick = async e => {
+    const text = $('#m-in').value.trim();
+    if (!text) return toast('Paste the message first', true);
+    const msg = { id: crypto.randomUUID(), dir: 'in', text, date: new Date().toISOString() };
+    patch({ messages: [...(store.getApp(a.id).messages || []), msg] });
+    if ($('#m-add-draft').checked) { $('#m-in').value = ''; return runDraft(e.currentTarget); }
+    route();
+  };
+  $('#m-draft').onclick = e => {
+    if (reply.value.trim() && !confirm('Replace the current draft?')) return;
+    runDraft(e.currentTarget);
+  };
+
+  let t;
+  reply.oninput = () => {
+    setSaveStatus('Editing…');
+    clearTimeout(t);
+    t = setTimeout(() => { patch({ replyDraft: reply.value }); setSaveStatus('Saved'); }, 400);
+  };
+  $('#m-copy').onclick = async () => {
+    if (/\[[^\]]+\]/.test(reply.value) && !confirm('The reply still has [placeholders]. Copy anyway?')) return;
+    try { await navigator.clipboard.writeText(reply.value); toast('Copied. Paste it into your email and send.'); }
+    catch { reply.select(); toast('Press Ctrl+C to copy', true); }
+  };
+  $('#m-sent').onclick = () => {
+    const text = reply.value.trim();
+    if (!text) return toast('Nothing to mark as sent', true);
+    const msg = { id: crypto.randomUUID(), dir: 'out', text, date: new Date().toISOString() };
+    patch({ messages: [...(store.getApp(a.id).messages || []), msg], replyDraft: '', replyNotes: '' });
+    route();
+  };
+  document.querySelectorAll('[data-del]').forEach(b => (b.onclick = () => {
+    if (!confirm('Delete this message?')) return;
+    patch({ messages: (store.getApp(a.id).messages || []).filter(m => m.id !== b.dataset.del) });
+    route();
+  }));
 }
 
 function renderJobTab(a, patch) {

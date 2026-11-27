@@ -3,6 +3,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import mammoth from 'mammoth';
 import { Document, Packer, Paragraph, TextRun, AlignmentType, BorderStyle } from 'docx';
 import { marked } from 'marked';
+import { safeMd } from './safe.js';
 import { linesToPlain } from './docxTemplate.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('./pdf.worker.min.mjs', import.meta.url).href;
@@ -149,7 +150,7 @@ export function printPdf(app, kind) {
   const w = window.open('', '_blank');
   if (!w) throw new Error('Pop-up blocked. Allow pop-ups for this site to save PDFs.');
   w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>${PRINT_CSS}</style></head>
-<body><div class="page">${marked.parse(md || '')}</div></body></html>`);
+<body><div class="page">${safeMd(md || '')}</div></body></html>`);
   w.document.close();
   setTimeout(() => { w.focus(); w.print(); }, 400);
 }
