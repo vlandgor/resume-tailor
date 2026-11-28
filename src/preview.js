@@ -127,8 +127,8 @@ export async function measureMdPages(md) {
 }
 
 // Opens the styled resume in a new window and starts the print dialog ("Save as PDF").
-export async function printDocx(blob, title, page, fonts) {
-  const w = window.open('', '_blank');
+// Pass a window opened synchronously in the click handler: phones block window.open after an await.
+export async function printDocx(blob, title, page, fonts, w = window.open('', '_blank')) {
   if (!w) throw new Error('Pop-up blocked. Allow pop-ups for this site to save PDFs.');
   const box = offscreen(page.width + 1);
   try {
