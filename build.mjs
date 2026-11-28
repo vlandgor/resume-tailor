@@ -3,6 +3,7 @@
 // npm run dev     -> local server at http://localhost:5173 with rebuild on JS changes
 import * as esbuild from 'esbuild';
 import fs from 'fs';
+import { createHash } from 'crypto';
 
 const serve = process.argv.includes('--serve');
 
@@ -15,8 +16,15 @@ if (!SUPABASE_URL || !SUPABASE_KEY) console.warn('\n  ! SUPABASE_URL / SUPABASE_
 
 fs.rmSync('dist', { recursive: true, force: true });
 fs.mkdirSync('dist');
+// index.html links app.js/styles.css with ?v=<content hash>, so browsers load the new files right after a deploy
+// instead of serving cached ones (GitHub Pages lets browsers cache for ~10 minutes).
+const hash = f => (fs.existsSync(f) ? createHash('sha256').update(fs.readFileSync(f)).digest('hex').slice(0, 10) : 'dev');
 const copyStatic = () => {
-  for (const f of ['index.html', 'styles.css']) fs.copyFileSync(`src/${f}`, `dist/${f}`);
+  fs.copyFileSync('src/styles.css', 'dist/styles.css');
+  const html = fs.readFileSync('src/index.html', 'utf8')
+    .replace('./styles.css', `./styles.css?v=${hash('dist/styles.css')}`)
+    .replace('./app.js', `./app.js?v=${hash('dist/app.js')}`);
+  fs.writeFileSync('dist/index.html', html);
 };
 copyStatic();
 fs.copyFileSync('node_modules/pdfjs-dist/build/pdf.worker.min.mjs', 'dist/pdf.worker.min.mjs');
