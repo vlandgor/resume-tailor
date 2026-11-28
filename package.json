@@ -9,6 +9,7 @@
     "dev": "node build.mjs --serve"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.119.2",
     "docx": "^9.0.0",
     "docx-preview": "^0.4.1",
     "dompurify": "^3.5.0",
