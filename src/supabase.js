@@ -7,6 +7,7 @@ export const configured = !!(__SUPABASE_URL__ && __SUPABASE_KEY__);
 
 export const sb = configured
   ? createClient(__SUPABASE_URL__, __SUPABASE_KEY__, {
-    auth: { persistSession: true, autoRefreshToken: true, storageKey: 'rt.auth' },
+    // PKCE: sign-in redirects come back as ?code=… (query), which doesn't clash with the app's #/hash routes.
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'pkce', storageKey: 'rt.auth' },
   })
   : null;

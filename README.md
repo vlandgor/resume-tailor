@@ -10,18 +10,25 @@ Live: https://vlandgor.github.io/resume-tailor/
 
 1. **Create a Supabase project** at supabase.com (free tier is plenty).
 2. **Create the tables**: *SQL Editor → New query*, paste [`supabase/schema.sql`](supabase/schema.sql), *Run*. It creates `user_state`, `applications` and `templates`, turns on row-level security (each user can only touch their own rows) and grants access to signed-in users only.
-3. **Make it invite-only**: *Authentication → Sign In / Providers*: keep **Email** enabled and turn **off** "Allow new users to sign up".
-4. **Create the accounts**: *Authentication → Users → Add user → Create new user*, enter email + password, tick **Auto Confirm User**. Repeat for each person. They can change their password later in *Settings & account*.
-5. **Connect the site**: copy the **Project URL** and the **publishable key** (*Project Settings → API Keys*; on older projects, the `anon` key works too). In GitHub: *repo → Settings → Secrets and variables → Actions → Variables*, add `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. Re-run the Pages workflow (or push).
+3. **Sign-in settings** (*Authentication*):
+   - *URL Configuration*: **Site URL** = `https://vlandgor.github.io/resume-tailor/`. Under **Redirect URLs** add `https://vlandgor.github.io/resume-tailor/**` and `http://localhost:5173/**`. Google sign-in, email confirmation and password-reset links only return to these addresses.
+   - *Sign In / Providers*: keep **Email** on with **Confirm email** on. "Allow new users to sign up" controls whether anyone can create an account (turn it off to make the app invite-only again; you can still add people under *Users → Add user*).
+4. **Google sign-in** (optional):
+   - In [Google Cloud Console](https://console.cloud.google.com/) create a project, set up the **OAuth consent screen** (External, app name, your email), then *APIs & Services → Credentials → Create credentials → OAuth client ID → Web application*.
+   - **Authorized JavaScript origins**: `https://vlandgor.github.io`. **Authorized redirect URIs**: the callback URL shown in Supabase under *Sign In / Providers → Google* (looks like `https://<project-ref>.supabase.co/auth/v1/callback`).
+   - Paste the Google **Client ID** and **Client secret** into that Supabase Google provider and enable it.
+   - While the consent screen is in *Testing*, only the Google accounts listed as test users can sign in; *Publish app* to open it to anyone.
+5. **Email for other people**: Supabase's built-in email sender only delivers to members of your Supabase team, and only a couple of messages per hour. Before letting others sign up with email (confirmation and password-reset mails), connect a mail provider under *Project Settings → Authentication → SMTP Settings* (e.g. Resend, Brevo). Google sign-in doesn't need email at all.
+6. **Connect the site**: copy the **Project URL** and the **publishable key** (*Project Settings → API Keys*; on older projects, the `anon` key works too). In GitHub: *repo → Settings → Secrets and variables → Actions → Variables*, add `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. Re-run the Pages workflow (or push).
    For local dev, copy `.env.example` to `.env` and fill in the same two values.
 
 Both values are public by design (they end up in the page). What protects the data is sign-in plus row-level security. Never put the **secret** / `service_role` key anywhere in this repo.
 
-Forgotten sign-in password: reset it in *Authentication → Users* (there's no email reset flow, on purpose).
+Forgotten password: *Forgot password?* on the sign-in screen emails a reset link (needs step 5 for anyone outside your Supabase team). You can also set a password in *Authentication → Users*.
 
 ## First use
 
-1. **Sign in**. If this browser has data from before accounts, the app offers to **import it into your account** (it's removed from the browser once it's safely saved).
+1. **Sign in** with Google, or create an account with email + password. If this browser has data from before accounts, the app offers to **import it into your account** (it's removed from the browser once it's safely saved).
 2. **Settings & account** → paste an API key for at least one provider (Anthropic, OpenAI, Gemini, OpenRouter, or a local Ollama), choose a **key passphrase**, and pick a default model.
 3. **Base resume** → upload your resume **as DOCX** to keep your styling.
    From Google Docs: *File → Download → Microsoft Word (.docx)*.
