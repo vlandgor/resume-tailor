@@ -6,6 +6,13 @@ import fs from 'fs';
 
 const serve = process.argv.includes('--serve');
 
+// Supabase project URL + publishable key (both public; RLS protects the data).
+// Locally: put them in a .env file (see .env.example). In GitHub Actions: repository variables.
+try { process.loadEnvFile('.env'); } catch { /* no .env file */ }
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_PUBLISHABLE_KEY || '';
+if (!SUPABASE_URL || !SUPABASE_KEY) console.warn('\n  ! SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY not set: the app will show a setup message.\n');
+
 fs.rmSync('dist', { recursive: true, force: true });
 fs.mkdirSync('dist');
 const copyStatic = () => {
@@ -24,6 +31,7 @@ const options = {
   minify: !serve,
   sourcemap: serve,
   logLevel: 'info',
+  define: { __SUPABASE_URL__: JSON.stringify(SUPABASE_URL), __SUPABASE_KEY__: JSON.stringify(SUPABASE_KEY) },
   plugins: [{ name: 'copy-static', setup: b => b.onEnd(copyStatic) }],
 };
 

@@ -14,7 +14,7 @@ const XML_NS = 'http://www.w3.org/XML/1998/namespace';
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const LINE_RE = /^§(\d+)(?:\s*\[link\])?\s*\|\s?(.*)$/;
 
-// ---------- base64 (templates are stored in localStorage) ----------
+// ---------- base64 (templates are stored as base64 text in the database) ----------
 export function toB64(buf) {
   const bytes = new Uint8Array(buf);
   let s = '';

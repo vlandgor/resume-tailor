@@ -1,7 +1,7 @@
-// Resume Tailor — browser-only app (hash routing, localStorage, direct AI calls)
-import { marked } from 'marked';
+// Resume Tailor — static app (hash routing, Supabase accounts + storage, direct AI calls from the browser)
 import { safeMd } from './safe.js';
 import { store } from './store.js';
+import { sb, configured } from './supabase.js';
 import { listModels, complete, providerList } from './providers.js';
 import * as prompts from './prompts.js';
 import { extractResumeText, downloadDocx, printPdf, downloadBlob, fileBase } from './files.js';
@@ -15,7 +15,7 @@ const STATUSES = ['draft', 'applied', 'interview', 'offer', 'rejected'];
 const MAX_PAGES = 2;
 // The browser estimate runs ~15% short of real Word/Docs layout, so enforce with a safety margin.
 const PAGE_LIMIT = 1.85;
-const state = { providers: [], settings: null, models: {} };
+const state = { providers: [], settings: null, models: {}, user: null };
 
 let toastTimer;
 function toast(msg, isErr = false) {
@@ -136,7 +136,7 @@ $('#search').oninput = renderList;
 function pickerHTML(p) {
   return `<div class="picker">
     <select id="${p}-prov" title="AI provider">${state.providers.map(x =>
-      `<option value="${x.id}">${esc(x.label)}${x.hasKey ? '' : ' — no key'}</option>`).join('')}</select>
+      `<option value="${x.id}">${esc(x.label)}${x.hasKey ? '' : x.locked ? ' — locked' : ' — no key'}</option>`).join('')}</select>
     <input id="${p}-model" list="${p}-models" placeholder="Model (pick or type)" title="Model ID">
     <datalist id="${p}-models"></datalist>
   </div>`;
@@ -710,27 +710,62 @@ function viewResume() {
 
 function viewSettings() {
   const s = store.getSettings();
+  const vault = store.vaultStatus();
+  const legacy = store.legacyLocal().keys; // plain-text keys saved in this browser before accounts
+  const useLegacy = vault === 'none' && Object.keys(legacy).length > 0;
   const keyed = state.providers.filter(p => p.needsKey);
   const mask = k => (k ? `••••${k.slice(-4)}` : '');
-  main.innerHTML = `<div class="narrow">
-    <h1>Settings</h1>
-    <p class="muted">API keys are stored only in this browser (localStorage) and are sent only to the provider you pick.
-    Nothing is stored on GitHub.</p>
-    <h3>API keys</h3>
-    ${keyed.map(p => `<div class="key-row">
+  const keyRows = keyed.map(p => `<div class="key-row">
       <span>${esc(p.label)}</span>
       <input type="password" id="k-${p.id}" placeholder="${s.keys[p.id] ? `Saved (${mask(s.keys[p.id])}) — type to replace` : 'Paste API key'}" autocomplete="off">
       ${s.keys[p.id] ? `<label class="chk"><input type="checkbox" id="c-${p.id}"> remove</label>` : '<span></span>'}
-    </div>`).join('')}
+    </div>`).join('');
+  const remember = id => `<label class="chk"><input type="checkbox" id="${id}" checked> Remember on this device</label>`;
+
+  main.innerHTML = `<div class="narrow">
+    <h1>Settings</h1>
+
+    <h3>API keys</h3>
+    <p class="muted">Your keys are encrypted <b>in this browser</b> with your passphrase before they're saved to your account.
+      The database only holds the encrypted version, so nobody can read your keys without the passphrase, not even the server.
+      Keys are sent only to the provider you pick. If you forget the passphrase, reset it and paste your keys again.</p>
+    ${vault === 'locked' ? `
+      <div class="banner">
+        <b>Your keys are locked.</b> Enter your passphrase to use them on this device.
+        <div class="row" style="margin-top:8px">
+          <input type="password" id="v-unlock" placeholder="Passphrase" autocomplete="off">
+          <button id="v-unlock-go" class="primary">Unlock</button>
+        </div>
+        <div class="row" style="margin-top:8px;justify-content:space-between">${remember('v-remember')}
+          <button id="v-reset" class="link danger">Forgot passphrase? Reset keys</button></div>
+      </div>` : `
+      ${useLegacy ? `<div class="banner">Found ${Object.keys(legacy).length} API key(s) saved in this browser before accounts.
+        They're filled in below: set a passphrase and press <b>Save settings</b> to move them into your account, encrypted.</div>` : ''}
+      ${keyRows}
+      ${vault === 'none' ? `
+        <div class="grid2">
+          <div><label>Passphrase <span class="muted">(at least 8 characters)</span></label><input type="password" id="v-pass" autocomplete="new-password"></div>
+          <div><label>Repeat passphrase</label><input type="password" id="v-pass2" autocomplete="new-password"></div>
+        </div>
+        <p class="muted" style="margin:6px 0 16px;font-size:12px">Different from your sign-in password. ${remember('v-remember')}</p>`
+      : `<p class="muted" style="font-size:12px">Unlocked on this device. <button id="v-lock" class="link">Lock now</button></p>`}`}
     <div class="key-row"><span>Ollama URL</span><input id="s-ollama" value="${esc(s.ollamaUrl)}"><span></span></div>
+
     <h3 style="margin-top:28px">Default model</h3>
     <p class="muted">Used until you pick something else (the last model you used is remembered too).</p>
     ${pickerHTML('s')}
     <div style="margin-top:24px"><button id="s-save" class="primary">Save settings</button></div>
 
+    <h3 style="margin-top:40px">Account</h3>
+    <p class="muted">Signed in as <b>${esc(state.user.email)}</b>. Your resume, templates and applications are saved to your account
+      and only you can see them.</p>
+    <div class="row">
+      <input type="password" id="a-pass" placeholder="New sign-in password (at least 8 characters)" autocomplete="new-password">
+      <button id="a-save">Change password</button>
+    </div>
+
     <h3 style="margin-top:40px">Backup</h3>
-    <p class="muted">Your resume, style template and applications live only in this browser. Export a backup now and then, and use Import to move
-    them to another computer or browser. API keys are not included.</p>
+    <p class="muted">Download everything as a file, or import a backup into this account. API keys are not included.</p>
     <div class="row">
       <button id="x-export">Export backup (.json)</button>
       <label class="btn" style="margin:0">Import backup<input type="file" id="x-import" accept=".json" hidden></label>
@@ -739,23 +774,73 @@ function viewSettings() {
   initPicker('s');
   $('#s-prov').value = s.defaultProvider;
   $('#s-model').value = s.defaultModel;
+  if (useLegacy) for (const [id, v] of Object.entries(legacy)) { const el = $(`#k-${id}`); if (el) el.value = v; }
 
-  $('#s-save').onclick = () => {
+  const afterKeysChange = () => { state.models = {}; loadMeta(); viewSettings(); };
+  if (vault === 'locked') {
+    const go = async () => {
+      const btn = $('#v-unlock-go');
+      busy(btn, true, 'Unlocking…');
+      try {
+        await store.unlock($('#v-unlock').value, $('#v-remember').checked);
+        toast('Keys unlocked');
+        afterKeysChange();
+      } catch (e) { busy(btn, false); toast(e.message, true); }
+    };
+    $('#v-unlock-go').onclick = go;
+    $('#v-unlock').onkeydown = e => { if (e.key === 'Enter') go(); };
+    $('#v-reset').onclick = async () => {
+      if (!confirm('Delete your saved API keys? You\'ll need to paste them again and choose a new passphrase.')) return;
+      await store.resetVault();
+      afterKeysChange();
+    };
+  }
+  if (vault === 'unlocked') {
+    $('#v-lock').onclick = async () => { await store.lock(); toast('Keys locked on this device'); afterKeysChange(); };
+  }
+
+  $('#s-save').onclick = async e => {
+    const btn = e.currentTarget;
     const next = { ...s, keys: { ...s.keys } };
-    keyed.forEach(p => {
-      const v = $(`#k-${p.id}`).value.trim();
-      if (v) next.keys[p.id] = v;
-      if ($(`#c-${p.id}`)?.checked) delete next.keys[p.id];
-    });
+    if (vault !== 'locked') {
+      keyed.forEach(p => {
+        const v = $(`#k-${p.id}`).value.trim();
+        if (v) next.keys[p.id] = v;
+        if ($(`#c-${p.id}`)?.checked) delete next.keys[p.id];
+      });
+    }
     next.ollamaUrl = $('#s-ollama').value.trim();
     next.defaultProvider = $('#s-prov').value;
     next.defaultModel = $('#s-model').value.trim();
-    store.saveSettings(next);
-    localStorage.removeItem('rt.lastModel');
-    state.models = {};
-    loadMeta();
-    toast('Settings saved');
-    viewSettings();
+    const keysChanged = JSON.stringify(next.keys) !== JSON.stringify(s.keys);
+    try {
+      if (keysChanged && vault === 'none') {
+        const pass = $('#v-pass').value;
+        if (pass !== $('#v-pass2').value) throw new Error('The two passphrases don\'t match.');
+        busy(btn, true, 'Encrypting…');
+        await store.setupVault(pass, $('#v-remember').checked);
+      }
+      store.saveSettings(next);
+      if (keysChanged) {
+        await store.syncNow();
+        store.clearLegacyKeys(); // the plain-text copy in this browser is no longer needed
+      }
+      localStorage.removeItem('rt.lastModel');
+      toast('Settings saved');
+      afterKeysChange();
+    } catch (err) { busy(btn, false); toast(err.message, true); }
+  };
+
+  $('#a-save').onclick = async e => {
+    const password = $('#a-pass').value;
+    if (password.length < 8) return toast('Use at least 8 characters', true);
+    const btn = e.currentTarget;
+    busy(btn, true, 'Saving…');
+    const { error } = await sb.auth.updateUser({ password });
+    busy(btn, false);
+    if (error) return toast(error.message, true);
+    $('#a-pass').value = '';
+    toast('Password changed');
   };
 
   $('#x-export').onclick = () => {
@@ -766,10 +851,39 @@ function viewSettings() {
     const f = e.target.files[0];
     if (!f) return;
     try {
-      const n = store.importAll(JSON.parse(await f.text()));
+      const n = await store.importAll(JSON.parse(await f.text()));
       renderList();
       toast(`Imported ${n} application${n === 1 ? '' : 's'}`);
     } catch (err) { toast(err.message, true); }
+  };
+}
+
+// ---------- one-time import of data saved in this browser before accounts ----------
+const migrateFlag = () => `rt.migrateDismissed.${state.user.id}`;
+function migrationBanner() {
+  if (localStorage.getItem(migrateFlag()) || !store.isAccountEmpty()) return;
+  const legacy = store.legacyLocal();
+  if (!legacy.hasData) return;
+  main.insertAdjacentHTML('afterbegin', `<div class="banner" id="migrate">
+    <b>Found data saved in this browser from before accounts</b>
+    (${legacy.backup.resume?.text ? 'base resume, ' : ''}${legacy.nApps} application${legacy.nApps === 1 ? '' : 's'}).
+    Import it into your account?
+    <div class="row" style="margin-top:8px"><button id="mg-go" class="primary">Import into my account</button>
+      <button id="mg-no">Not now</button></div>
+  </div>`);
+  $('#mg-no').onclick = () => { localStorage.setItem(migrateFlag(), '1'); $('#migrate').remove(); };
+  $('#mg-go').onclick = async e => {
+    busy(e.currentTarget, true, 'Importing…');
+    try {
+      const n = await store.importAll(legacy.backup);
+      await store.syncNow();
+      store.clearLegacyData(); // only after it's safely in the account
+      localStorage.setItem(migrateFlag(), '1');
+      state.settings = store.getSettings();
+      toast(`Imported ${n} application${n === 1 ? '' : 's'} into your account`);
+      if (Object.keys(legacy.keys).length) location.hash = '#/settings'; // finish moving the API keys there
+      else route();
+    } catch (err) { busy(e.currentTarget, false); toast(err.message, true); }
   };
 }
 
@@ -778,10 +892,11 @@ function route() {
   window.onresize = null;
   const [, view, id, tab] = location.hash.split('/');
   renderList();
-  if (view === 'app' && id) return viewApp(id, tab);
-  if (view === 'resume') return viewResume();
-  if (view === 'settings') return viewSettings();
-  return viewNew();
+  if (view === 'app' && id) viewApp(id, tab);
+  else if (view === 'resume') viewResume();
+  else if (view === 'settings') viewSettings();
+  else viewNew();
+  migrationBanner();
 }
 
 function loadMeta() {
@@ -789,7 +904,76 @@ function loadMeta() {
   state.providers = providerList(state.settings);
 }
 
-window.addEventListener('hashchange', route);
-loadMeta();
-if (!location.hash) location.hash = store.getBaseResume().text ? '#/new' : '#/resume';
-else route();
+// ---------- sign-in & startup ----------
+const authView = document.createElement('div');
+authView.id = 'authView';
+document.body.append(authView);
+
+function showAuth(html) {
+  document.body.classList.add('signed-out');
+  authView.innerHTML = `<div class="auth-card"><div class="auth-brand">Resume Tailor</div>${html}</div>`;
+}
+
+function showLogin() {
+  showAuth(`<form id="loginForm">
+    <p class="muted" style="margin-top:0">Sign in to your account.</p>
+    <label>Email</label><input id="l-email" type="email" autocomplete="username" required>
+    <label>Password</label><input id="l-pass" type="password" autocomplete="current-password" required>
+    <button class="primary block" style="width:100%;margin-top:18px">Sign in</button>
+    <p class="muted" style="font-size:12px;margin-bottom:0">Accounts are invite-only.</p>
+  </form>`);
+  $('#l-email').focus();
+  $('#loginForm').onsubmit = async e => {
+    e.preventDefault();
+    const btn = e.target.querySelector('button');
+    busy(btn, true, 'Signing in…');
+    const { data, error } = await sb.auth.signInWithPassword({ email: $('#l-email').value.trim(), password: $('#l-pass').value });
+    if (error) { busy(btn, false); return toast(error.message, true); }
+    start(data.user);
+  };
+}
+
+function initSyncStatus() {
+  const el = $('#sync');
+  let shownError = false;
+  store.onSync((status, err) => {
+    el.className = `sync ${status}`;
+    el.textContent = { saving: 'Saving…', saved: 'All changes saved', error: 'Not saved — retrying…' }[status];
+    el.title = err?.message || '';
+    if (status === 'error' && !shownError) { shownError = true; toast(`Couldn't save to your account: ${err.message}`, true); }
+    if (status === 'saved') shownError = false;
+  });
+  window.addEventListener('beforeunload', e => { if (store.hasPendingWrites()) e.preventDefault(); });
+}
+
+async function start(user) {
+  document.body.classList.remove('signed-out');
+  authView.innerHTML = '';
+  state.user = user;
+  main.innerHTML = '<p class="muted">Loading your data…</p>';
+  try { await store.init(user.id); }
+  catch (e) {
+    main.innerHTML = `<div class="narrow"><h1>Couldn't load your data</h1><p class="danger">${esc(e.message)}</p>
+      <button onclick="location.reload()">Try again</button></div>`;
+    return;
+  }
+  $('#account').innerHTML = `<span title="${esc(user.email)}">${esc(user.email)}</span><button id="signOut" class="link">Sign out</button>`;
+  $('#signOut').onclick = async () => { await store.signOut(); location.reload(); };
+  initSyncStatus();
+  loadMeta();
+  window.addEventListener('hashchange', route);
+  if (!location.hash) location.hash = store.getBaseResume().text ? '#/new' : '#/resume';
+  else route();
+}
+
+async function boot() {
+  if (!configured) {
+    return showAuth(`<p>This build isn't connected to a database yet.</p>
+      <p class="muted">Set <code>SUPABASE_URL</code> and <code>SUPABASE_PUBLISHABLE_KEY</code> (see README → Accounts setup) and rebuild.</p>`);
+  }
+  sb.auth.onAuthStateChange(event => { if (event === 'SIGNED_OUT' && state.user) location.reload(); });
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) start(session.user);
+  else showLogin();
+}
+boot();

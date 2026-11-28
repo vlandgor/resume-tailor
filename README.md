@@ -1,15 +1,29 @@
 # Resume Tailor
 
-A personal tool that runs entirely in the browser. Keep one base resume, paste a job description, pick an AI model, and get a tailored resume (plus an optional cover letter) **in your own design**, never longer than 2 pages. Download it as DOCX or PDF. Every application is saved in the sidebar.
+A personal tool that runs in the browser, with accounts. Keep one base resume, paste a job description, pick an AI model, and get a tailored resume (plus an optional cover letter) **in your own design**, never longer than 2 pages. Download it as DOCX or PDF. Every application is saved in the sidebar.
 
-There is no backend. The page is static and deployed to GitHub Pages by `.github/workflows/pages.yml` on every push to `main`. AI calls go straight from your browser to the provider you pick.
+The page is static and deployed to GitHub Pages by `.github/workflows/pages.yml` on every push to `main`. Accounts and data live in [Supabase](https://supabase.com) (Postgres + Auth). AI calls go straight from your browser to the provider you pick.
 
 Live: https://vlandgor.github.io/resume-tailor/
 
+## Accounts setup (one time)
+
+1. **Create a Supabase project** at supabase.com (free tier is plenty).
+2. **Create the tables**: *SQL Editor → New query*, paste [`supabase/schema.sql`](supabase/schema.sql), *Run*. It creates `user_state`, `applications` and `templates`, turns on row-level security (each user can only touch their own rows) and grants access to signed-in users only.
+3. **Make it invite-only**: *Authentication → Sign In / Providers*: keep **Email** enabled and turn **off** "Allow new users to sign up".
+4. **Create the accounts**: *Authentication → Users → Add user → Create new user*, enter email + password, tick **Auto Confirm User**. Repeat for each person. They can change their password later in *Settings & account*.
+5. **Connect the site**: copy the **Project URL** and the **publishable key** (*Project Settings → API Keys*; on older projects, the `anon` key works too). In GitHub: *repo → Settings → Secrets and variables → Actions → Variables*, add `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. Re-run the Pages workflow (or push).
+   For local dev, copy `.env.example` to `.env` and fill in the same two values.
+
+Both values are public by design (they end up in the page). What protects the data is sign-in plus row-level security. Never put the **secret** / `service_role` key anywhere in this repo.
+
+Forgotten sign-in password: reset it in *Authentication → Users* (there's no email reset flow, on purpose).
+
 ## First use
 
-1. **Settings & backup** → paste an API key for at least one provider (Anthropic, OpenAI, Gemini, OpenRouter, or a local Ollama) and pick a default model.
-2. **Base resume** → upload your resume **as DOCX** to keep your styling.
+1. **Sign in**. If this browser has data from before accounts, the app offers to **import it into your account** (it's removed from the browser once it's safely saved).
+2. **Settings & account** → paste an API key for at least one provider (Anthropic, OpenAI, Gemini, OpenRouter, or a local Ollama), choose a **key passphrase**, and pick a default model.
+3. **Base resume** → upload your resume **as DOCX** to keep your styling.
    From Google Docs: *File → Download → Microsoft Word (.docx)*.
    PDF/TXT/pasted text also work, but then a built-in plain layout is used.
 
@@ -46,10 +60,11 @@ You can edit the lines yourself in the left pane; the preview on the right updat
 
 ## Where data lives
 
-Your resume, style template, applications and API keys live in this browser's localStorage. They are never in the repo.
-- A different browser or computer starts empty. Use **Settings → Backup** to export and import (keys aren't included).
-- Clearing site data deletes everything, so export a backup now and then.
-- localStorage is shared by every page on `vlandgor.github.io`, so keep that in mind if you publish other Pages sites.
+- **Your account (Supabase)**: settings, base resume, DOCX style templates and applications. Same data on every computer you sign in on. Each user sees only their own.
+- **API keys** are encrypted in your browser (AES-256-GCM, key derived from your passphrase with PBKDF2-SHA256, 600k rounds) and only the encrypted blob is saved. Without the passphrase nobody can read them, including whoever runs the database. On a new device you enter the passphrase once; *Remember on this device* keeps the unlocked key in that browser (as a non-extractable key) until you sign out or press *Lock now*. Forgot the passphrase? *Reset keys* and paste them again.
+- **This browser only**: the last model you picked and the preview mode.
+- Changes save in the background; the sidebar shows *Saving… / All changes saved*. If you're offline it keeps retrying, and the browser warns you before closing with unsaved changes.
+- **Settings → Backup** still exports everything (except keys) to a JSON file.
 
 ## Ollama (optional, local models)
 
@@ -62,6 +77,7 @@ On Windows, set `OLLAMA_ORIGINS` as a user environment variable and restart Olla
 
 ```bash
 npm install
+cp .env.example .env   # then fill in your Supabase URL + publishable key
 npm run dev     # http://localhost:5173, rebuilds on save (refresh the page)
 npm run build   # production build into dist/
 ```
@@ -70,4 +86,7 @@ npm run build   # production build into dist/
 - `src/docxTemplate.js`: DOCX → lines and lines → DOCX (style preservation)
 - `src/preview.js`: DOCX preview, page estimate, print-to-PDF
 - `src/files.js`: PDF/DOCX text extraction, built-in layout for plain-text mode
+- `src/store.js`: data layer (loads your account into memory, saves changes in the background)
+- `src/vault.js`: API-key encryption
+- `src/supabase.js`, `supabase/schema.sql`: database client and schema
 - `src/app.js`, `src/styles.css`: UI

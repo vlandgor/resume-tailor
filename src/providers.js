@@ -20,6 +20,7 @@ function getKey(provider, settings) {
   if (!p) throw new Error(`Unknown provider: ${provider}`);
   if (!p.needsKey) return null;
   const key = settings.keys?.[provider];
+  if (!key && settings.keysLocked) throw new Error('Your API keys are locked. Unlock them in Settings.');
   if (!key) throw new Error(`No API key for ${p.label}. Add it in Settings.`);
   return key;
 }
@@ -126,6 +127,6 @@ export async function complete({ provider, model, system, user, settings }) {
 
 export function providerList(settings) {
   return Object.entries(PROVIDERS).map(([id, p]) => ({
-    id, label: p.label, needsKey: p.needsKey, hasKey: !p.needsKey || !!settings.keys?.[id],
+    id, label: p.label, needsKey: p.needsKey, hasKey: !p.needsKey || !!settings.keys?.[id], locked: p.needsKey && !!settings.keysLocked,
   }));
 }
