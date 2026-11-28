@@ -132,6 +132,15 @@ function renderList() {
 }
 $('#search').oninput = renderList;
 
+// Phones: the sidebar is a drawer opened from the top bar.
+const setNav = open => {
+  document.body.classList.toggle('nav-open', open);
+  $('#menuBtn').setAttribute('aria-expanded', String(open));
+};
+$('#menuBtn').onclick = () => setNav(!document.body.classList.contains('nav-open'));
+$('#backdrop').onclick = () => setNav(false);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') setNav(false); });
+
 // ---------- model picker ----------
 function pickerHTML(p) {
   return `<div class="picker">
@@ -206,8 +215,30 @@ function initViewToggle(onChange) {
 function fitPreview(box) {
   const page = box.querySelector('section.docx');
   const wrap = box.querySelector('.docx-wrapper');
-  if (!page || !wrap) return;
-  wrap.style.zoom = Math.min(1, (box.clientWidth - 4) / (page.offsetWidth + 40));
+  if (!page || !wrap || !box.clientWidth) return; // hidden (e.g. Edit pane on a phone)
+  const cs = getComputedStyle(wrap);
+  const pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+  wrap.style.zoom = Math.min(1, (box.clientWidth - 4) / (page.offsetWidth + pad));
+}
+
+// On phones the editor shows one pane at a time. Preview first; remembered while the page is open.
+let pane = 'preview';
+const paneSeg = () => `<div class="seg pane-seg" id="paneSeg">
+  <button data-pane="edit">Edit</button><button data-pane="preview">Preview</button></div>`;
+function initPaneToggle(onPreview) {
+  const seg = $('#paneSeg'), editor = seg.nextElementSibling;
+  const sync = () => {
+    editor.dataset.pane = pane;
+    seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.pane === pane));
+  };
+  sync();
+  seg.onclick = e => {
+    const v = e.target.closest('button')?.dataset.pane;
+    if (!v || v === pane) return;
+    pane = v;
+    sync();
+    if (v === 'preview') onPreview?.(); // the preview was laid out while hidden: redo it
+  };
 }
 
 // ---------- views ----------
@@ -344,7 +375,8 @@ function renderResumeTab(a, patch) {
     ${a.changes ? `<details class="changes"><summary>What was changed</summary>${safeMd(a.changes)}</details>` : ''}
     <p class="muted" style="margin:0 0 10px;font-size:12px">${a.resumeModel ? `Generated with ${esc(a.resumeModel)} · ` : ''}${isDocx
       ? 'Your own DOCX styling is kept. Edit text after "|" on the left; delete a line to remove it, or duplicate a line to add one with the same formatting. Edits save automatically.'
-      : 'Edit on the left, preview on the right — edits save automatically.'}</p>
+      : 'Edit the text and check the preview. Edits save automatically.'}</p>
+    ${paneSeg()}
     <div class="editor ${isDocx ? 'docx-mode' : ''}">
       <textarea id="d-md" spellcheck="true"></textarea>
       ${isDocx ? previewCol('d-preview') : '<div id="d-preview" class="paper"></div>'}
@@ -376,6 +408,7 @@ function renderResumeTab(a, patch) {
   };
   render();
   if (isDocx) initViewToggle(render);
+  initPaneToggle(isDocx ? render : null);
   window.onresize = () => fitPreview(pv);
 
   let t;
@@ -401,11 +434,12 @@ function renderResumeTab(a, patch) {
     } catch (e) { toast(e.message, true); }
   };
   $('#dl-pdf').onclick = async () => {
+    const w = isDocx ? window.open('', '_blank') : null;
     try {
       const cur = store.getApp(a.id);
-      if (isDocx) await printDocx(await resumeBlob(cur), fileBase(cur, 'resume'), cur.page, cur.fonts);
+      if (isDocx) await printDocx(await resumeBlob(cur), fileBase(cur, 'resume'), cur.page, cur.fonts, w);
       else printPdf(cur, 'resume');
-    } catch (e) { toast(e.message, true); }
+    } catch (e) { w?.close(); toast(e.message, true); }
   };
   $('#g-go').onclick = e => {
     if (!confirm('This replaces the current version, including your manual edits. Continue?')) return;
@@ -437,11 +471,13 @@ function renderCoverTab(a, patch) {
       <button id="dl-pdf" class="primary">Save as PDF</button>
     </div>
     ${a.coverModel ? `<p class="muted" style="margin:0 0 10px;font-size:12px">Generated with ${esc(a.coverModel)} · edits save automatically.</p>` : ''}
+    ${paneSeg()}
     <div class="editor">
       <textarea id="d-md" spellcheck="true"></textarea>
       <div id="d-preview" class="paper"></div>
     </div>`;
   const getModel = initPicker('g');
+  initPaneToggle();
   const ta = $('#d-md'), pv = $('#d-preview');
   ta.value = a.coverMd;
   pv.innerHTML = safeMd(a.coverMd);
@@ -605,6 +641,7 @@ function viewResume() {
       <span class="muted" style="font-size:12px">${r.updatedAt ? `${esc(r.fileName || 'Edited')} · ${isDocx ? 'style template' : 'plain text'} · updated ${new Date(r.updatedAt).toLocaleString()}` : 'Not set yet'}</span>
     </div>
     ${isDocx ? `
+      ${paneSeg()}
       <div class="editor docx-mode">
         <div>
           <p class="muted" style="margin-top:0">What the AI sees: one line per paragraph. Edit the text after "| " and it saves automatically.
@@ -644,6 +681,7 @@ function viewResume() {
     };
     renderBase();
     initViewToggle(renderBase);
+    initPaneToggle(renderBase);
     window.onresize = () => fitPreview(pv);
 
     let t = null;
@@ -890,6 +928,7 @@ function migrationBanner() {
 // ---------- router ----------
 function route() {
   window.onresize = null;
+  setNav(false);
   const [, view, id, tab] = location.hash.split('/');
   renderList();
   if (view === 'app' && id) viewApp(id, tab);
